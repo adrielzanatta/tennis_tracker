@@ -8,7 +8,7 @@ import time
 # =====================================================================================
 # 1. CONFIGURAÇÃO GLOBAL DA APLICAÇÃO
 # =====================================================================================
-VIDEO_PATH = "C:/Users/zanat/Downloads/IMG_1592.MP4"
+VIDEO_PATH = "C:/Users/zanat/Downloads/IMG_1593.MP4"
 OUTPUT_CSV_PATH = VIDEO_PATH.split("/")[-1].replace(".MP4", "_analisado.csv")
 
 CONFIG = {
@@ -19,7 +19,7 @@ CONFIG = {
     # --- OTIMIZAÇÃO DE DESEMPENHO ---
     # Reduz a resolução para a análise. 50 = 50% do tamanho original.
     # Use 100 para desativar. Valores entre 30 e 50 são recomendados para vídeos em HD/FullHD.
-    "ANALYSIS_SCALE_PERCENT": 75,
+    "ANALYSIS_SCALE_PERCENT": 100,
     # --- TABELA DE CÓDIGOS E MAPEAMENTO DE TECLAS ---
     "KEY_MAPPINGS": {
         # --- CLASSE: Jogador (Inicia um ponto) ---
@@ -177,9 +177,7 @@ class TennisVideoAnalyzer:
             point_num_to_cancel = self.current_point_data["point_id"]
             self.current_state = "IDLE"
             self.current_point_data = None
-            # Não decrementamos o point_counter para que o próximo ponto pegue este número.
-            # Se preferir que o contador volte, descomente a linha abaixo.
-            # self.point_counter -= 1
+            self.point_counter -= 1
 
             self.last_event_info = (
                 f"Ponto {point_num_to_cancel} em andamento foi cancelado."
