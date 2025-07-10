@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 import cv2
 import pandas as pd
 import os
@@ -8,18 +6,16 @@ import time
 # =====================================================================================
 # 1. CONFIGURAÇÃO GLOBAL DA APLICAÇÃO
 # =====================================================================================
-VIDEO_PATH = "C:/Users/zanat/Downloads/IMG_1593.MP4"
-OUTPUT_CSV_PATH = VIDEO_PATH.split("/")[-1].replace(".MP4", "_analisado.csv")
-
+VIDEO_PATH = "C:/Users/adriez01/Downloads/IMG_4076.MP4"
+OUTPUT_CSV_PATH_POINTS = VIDEO_PATH.split("/")[-1].replace(".MP4", "_POINTS.csv")
+OUTPUT_CSV_PATH_EVENTS = VIDEO_PATH.split("/")[-1].replace(".MP4", "_EVENTS.csv")
 CONFIG = {
-    # --- JANELA E VÍDEO ---
-    "WINDOW_NAME": "Analisador de Golpes - Tênis",
     # Código para virar o vídeo: 0=vertical, 1=horizontal, -1=ambos, None=não virar.
-    "FLIP_VIDEO_CODE": -1,
+    "FLIP_VIDEO_CODE": None,
     # --- OTIMIZAÇÃO DE DESEMPENHO ---
     # Reduz a resolução para a análise. 50 = 50% do tamanho original.
     # Use 100 para desativar. Valores entre 30 e 50 são recomendados para vídeos em HD/FullHD.
-    "ANALYSIS_SCALE_PERCENT": 100,
+    "ANALYSIS_SCALE_PERCENT": 50,
     # --- TABELA DE CÓDIGOS E MAPEAMENTO DE TECLAS ---
     "KEY_MAPPINGS": {
         # --- CLASSE: Jogador (Inicia um ponto) ---
@@ -50,7 +46,7 @@ class TennisVideoAnalyzer:
     def __init__(self, config):
         self.config = config
         self.video_path = VIDEO_PATH
-        self.window_name = config["WINDOW_NAME"]
+        self.window_name = "Analisador de Golpes - Tênis"
 
         if not os.path.exists(self.video_path):
             raise FileNotFoundError(
@@ -67,36 +63,16 @@ class TennisVideoAnalyzer:
 
         self.all_points_data = []
         self.current_point_data = None
+        self.all_events_data = []
+        self.current_event_data = None
         self.point_counter = 0
+        self.score = {"A": 0, "B": 0}
 
         self._setup_ui()
 
     def _setup_ui(self):
         """Configura a janela da aplicação."""
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-
-    def _draw_overlay(self, frame):
-        """Desenha o painel de ajuda e status na tela (versão otimizada)."""
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        y_pos = 40
-
-        def draw_text(text, pos, color=(255, 255, 255), scale=0.7):
-            cv2.putText(frame, text, pos, font, scale, color, 1, cv2.LINE_AA)
-
-        # Painel de Status
-        status_text = f"ESTADO: {'GRAVANDO PONTO' if self.current_state == 'RECORDING_POINT' else 'AGUARDANDO PONTO'}"
-        status_color = (
-            (0, 0, 255) if self.current_state == "RECORDING_POINT" else (0, 255, 255)
-        )
-        if self.is_paused:
-            status_text += " (PAUSADO)"
-        draw_text(status_text, (20, y_pos), status_color, scale=1.0)
-        y_pos += 40
-
-        # Último Evento Registrado
-        if self.last_event_info:
-            draw_text(f"Ultimo: {self.last_event_info}", (20, y_pos), (0, 255, 0))
-            y_pos += 40
 
     def _get_current_timestamp(self):
         """Retorna o número e o timestamp em segundos do quadro atual."""
@@ -120,7 +96,6 @@ class TennisVideoAnalyzer:
             "point_id": self.point_counter,
             "server": event_info["code"],
             "start_time_sec": timestamp,
-            "events": [],
         }
         self.current_state = "RECORDING_POINT"
         self.last_event_info = f"Ponto {self.point_counter} iniciado. Sacador: Jogador {event_info['code']}"
@@ -128,23 +103,22 @@ class TennisVideoAnalyzer:
             f"\n--- Ponto {self.point_counter} iniciado (Sacador: {event_info['desc']}) em {timestamp:.2f}s ---"
         )
 
-    def add_event_to_point(self, event_info):
+    def add_event(self, event_info):
         """Adiciona um evento (golpe) a um ponto em andamento."""
         if self.current_state != "RECORDING_POINT":
             self.last_event_info = "ERRO: Inicie um ponto primeiro (A ou B)!"
             return
 
         frame, timestamp = self._get_current_timestamp()
-        self.current_point_data["events"].append(
-            {
-                "timestamp_sec": timestamp,
-                "frame": frame,
-                "event_code": event_info["code"],
-                "event_desc": event_info["desc"],
-            }
-        )
+        self.current_event_data = {
+            "point_id": self.point_counter,
+            "timestamp_sec": timestamp,
+            "frame": frame,
+            "event_code": event_info["code"],
+        }
+        self.all_events_data.append(self.current_event_data)
         self.last_event_info = f"Golpe: {event_info['desc']}"
-        print(f"  > Evento '{event_info['desc']}' adicionado em {timestamp:.2f}s")
+        print(f"  > Golpe '{event_info['desc']}' adicionado em {timestamp:.2f}s")
 
     def end_point(self, event_info):
         """Finaliza o ponto atual e armazena os dados."""
@@ -152,51 +126,40 @@ class TennisVideoAnalyzer:
             self.last_event_info = "ERRO: Nenhum ponto ativo para finalizar!"
             return
 
-        self.add_event_to_point(event_info)
         frame, timestamp = self._get_current_timestamp()
         self.current_point_data["end_time_sec"] = timestamp
-        self.current_point_data["duration_sec"] = (
-            timestamp - self.current_point_data["start_time_sec"]
-        )
         self.all_points_data.append(self.current_point_data)
+
         self.last_event_info = (
             f"Ponto {self.point_counter} finalizado: {event_info['desc']}"
         )
-        print(
-            f"--- Ponto {self.point_counter} finalizado. Duração: {self.current_point_data['duration_sec']:.2f}s ---\n"
-        )
+        print(f"--- Ponto {self.point_counter} finalizado. ---\n")
         self.current_state = "IDLE"
         self.current_point_data = None
 
-    def delete_last_point(self):
-        """
-        Apaga o último ponto concluído ou cancela o ponto atualmente em gravação.
-        """
-        # Cenário 1: Cancela um ponto que está sendo gravado no momento.
+    def delete_point_event(self):
         if self.current_state == "RECORDING_POINT":
-            point_num_to_cancel = self.current_point_data["point_id"]
-            self.current_state = "IDLE"
+            point_to_delete = self.point_counter
             self.current_point_data = None
             self.point_counter -= 1
-
-            self.last_event_info = (
-                f"Ponto {point_num_to_cancel} em andamento foi cancelado."
-            )
-            print(f"\n--- Ponto {point_num_to_cancel} em andamento foi CANCELADO. ---")
-            return
-
-        # Cenário 2: Apaga o último ponto que foi concluído e salvo.
-        if self.all_points_data:
-            deleted_point = self.all_points_data.pop()
-            self.point_counter -= 1  # Decrementa o contador geral de pontos
-
-            point_id = deleted_point["point_id"]
-            self.last_event_info = f"Ponto {point_id} foi APAGADO."
-            print(f"\n--- Último ponto concluído (Ponto {point_id}) foi APAGADO. ---")
+            self.all_events_data = [
+                event
+                for event in self.all_events_data
+                if event["point_id"] != point_to_delete
+            ]
+            print(f"\nPonto {point_to_delete} deletado com sucesso.\n")
+        elif self.current_state == "IDLE":
+            if self.all_points_data:
+                point_to_delete = self.point_counter - 1
+                self.all_points_data.pop()
+                self.all_events_data = [
+                    event
+                    for event in self.all_events_data
+                    if event["point_id"] != point_to_delete
+                ]
+                print("\nÚltimo ponto deletado com sucesso.\n")
         else:
-            # Cenário 3: Não há nada para apagar.
-            self.last_event_info = "Nenhum ponto para apagar."
-            print("\n--- Nenhum ponto concluído para apagar. ---")
+            print("\nNenhum ponto para deletar.\n")
 
     def save_to_csv(self):
         """Converte os dados coletados para um DataFrame e salva como CSV."""
@@ -204,26 +167,14 @@ class TennisVideoAnalyzer:
             print("Nenhum ponto foi gravado. Nenhum arquivo CSV será gerado.")
             return
 
-        output_data = []
-        for point in self.all_points_data:
-            for event in point["events"]:
-                output_data.append(
-                    {
-                        "point_id": point["point_id"],
-                        "server": point["server"],
-                        "point_start_time_sec": point["start_time_sec"],
-                        "point_end_time_sec": point.get("end_time_sec"),
-                        "point_duration_sec": point.get("duration_sec"),
-                        "event_timestamp_sec": event["timestamp_sec"],
-                        "event_frame": event["frame"],
-                        "event_code": event["event_code"],
-                        "event_description": event["event_desc"],
-                    }
-                )
+        df_points = pd.DataFrame(self.all_points_data)
+        df_points.to_csv(OUTPUT_CSV_PATH_POINTS, index=False, sep=";", decimal=",")
 
-        df = pd.DataFrame(output_data)
-        df.to_csv(OUTPUT_CSV_PATH, index=False, sep=";", decimal=",")
-        print(f"\nAnálise salva com sucesso em: {self.config['OUTPUT_CSV_PATH']}")
+        df_events = pd.DataFrame(self.all_events_data)
+        df_events.to_csv(OUTPUT_CSV_PATH_EVENTS, index=False, sep=";", decimal=",")
+
+        print(f"\nAnálise salva com sucesso em: {OUTPUT_CSV_PATH_POINTS}")
+        print(f"Eventos salvos em: {OUTPUT_CSV_PATH_EVENTS}")
 
     def run(self):
         """Inicia o loop principal com lógica de reprodução corrigida e otimizada."""
@@ -231,8 +182,6 @@ class TennisVideoAnalyzer:
         scale_percent = self.config.get("ANALYSIS_SCALE_PERCENT", 100)
 
         while self.cap.isOpened():
-            # Define a posição do vídeo, garantindo que não ultrapasse os limites
-            current_frame_num = max(0, min(current_frame_num, self.total_frames - 1))
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_num)
 
             ret, frame = self.cap.read()
@@ -248,7 +197,6 @@ class TennisVideoAnalyzer:
             if self.config["FLIP_VIDEO_CODE"] is not None:
                 frame = cv2.flip(frame, self.config["FLIP_VIDEO_CODE"])
 
-            self._draw_overlay(frame)
             cv2.imshow(self.window_name, frame)
 
             key = cv2.waitKey(1)
@@ -259,8 +207,8 @@ class TennisVideoAnalyzer:
             elif key == ord(" "):
                 self.is_paused = not self.is_paused
             elif key == ord("z"):
-                self.delete_last_point()
-                self.is_paused = True  # Pausa para o usuário ver o feedback
+                self.delete_point_event()
+                continue
 
             # Navegação por quadros
             elif key == ord("k"):
@@ -285,13 +233,14 @@ class TennisVideoAnalyzer:
                 if action == "START_POINT":
                     self.start_new_point(event_info)
                 elif action == "ADD_EVENT":
-                    self.add_event_to_point(event_info)
+                    self.add_event(event_info)
                 elif action == "END_POINT":
+                    self.add_event(event_info)
                     self.end_point(event_info)
 
             # Avança para o próximo quadro somente se não estiver pausado
             if not self.is_paused:
-                current_frame_num += 5
+                current_frame_num += 3
 
             if current_frame_num >= self.total_frames - 1:
                 self.is_paused = True
@@ -303,16 +252,7 @@ class TennisVideoAnalyzer:
 
 if __name__ == "__main__":
     # Verifica se as dependências estão instaladas
-    try:
-        import cv2
-        import pandas as pd
-    except ImportError:
-        print("ERRO: Dependências não encontradas.")
-        print("Por favor, instale-as com o comando: pip install opencv-python pandas")
-        exit()
-
-    try:
-        print("""Atalhos disponíveis:
+    print("""Atalhos disponíveis:
             - 'A' para Jogador A iniciar ponto
             - 'B' para Jogador B iniciar ponto
             - '1', '2', 'f', 'b', 'd', 'm', 'v', 's' para adicionar eventos
@@ -321,8 +261,5 @@ if __name__ == "__main__":
             - 'z' para apagar o último ponto
             - 'x' para sair do programa
             - Use as teclas de navegação (k, K, l, j, L, J) para controlar os quadros""")
-        analyzer = TennisVideoAnalyzer(CONFIG)
-        analyzer.run()
-
-    except Exception as e:
-        print(f"Ocorreu um erro fatal: {e}")
+    analyzer = TennisVideoAnalyzer(CONFIG)
+    analyzer.run()
