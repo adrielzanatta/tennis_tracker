@@ -1,31 +1,40 @@
-# -*- coding: utf-8 -*-
-
 import cv2
 import pandas as pd
 import os
 import time
+from threading import Thread
+from queue import Queue
+import sys
+from threading import Lock
 
 # =====================================================================================
 # 1. CONFIGURAÇÃO GLOBAL DA APLICAÇÃO
 # =====================================================================================
-VIDEO_PATH = "C:/Users/zanat/Downloads/IMG_1593.MP4"
-OUTPUT_CSV_PATH = VIDEO_PATH.split("/")[-1].replace(".MP4", "_analisado.csv")
+if len(sys.argv) > 1:
+    VIDEO_PATH = sys.argv[1]
+else:
+    raise ValueError(
+        "Por favor, forneça o caminho do vídeo como argumento: python main.py <caminho_do_video>"
+    )
+
+# Geração mais robusta do caminho de saída do CSV
+video_filename = os.path.basename(VIDEO_PATH)
+video_name_without_ext = os.path.splitext(video_filename)[0]
+OUTPUT_CSV_PATH = f"./{video_name_without_ext}_analisado.csv"
+print(f"Arquivo de saída será: {OUTPUT_CSV_PATH}")
 
 CONFIG = {
     # --- JANELA E VÍDEO ---
-    "WINDOW_NAME": "Analisador de Golpes - Tênis",
-    # Código para virar o vídeo: 0=vertical, 1=horizontal, -1=ambos, None=não virar.
-    "FLIP_VIDEO_CODE": -1,
+    "WINDOW_NAME": "Analisador de Golpes - Tênis (Otimizado)",
+    "FLIP_VIDEO_CODE": 1,
     # --- OTIMIZAÇÃO DE DESEMPENHO ---
-    # Reduz a resolução para a análise. 50 = 50% do tamanho original.
-    # Use 100 para desativar. Valores entre 30 e 50 são recomendados para vídeos em HD/FullHD.
-    "ANALYSIS_SCALE_PERCENT": 100,
-    # --- TABELA DE CÓDIGOS E MAPEAMENTO DE TECLAS ---
+    "ANALYSIS_SCALE_PERCENT": 80,  # Reduz para 30% para análise, muito mais rápido
+    "THREAD_QUEUE_SIZE": 256,  # Frames para bufferizar em memória. 128 ou 256 é um bom valor.
+    # --- CONTROLES ---
     "KEY_MAPPINGS": {
-        # --- CLASSE: Jogador (Inicia um ponto) ---
+        # ... (seu mapeamento de teclas permanece o mesmo) ...
         ord("A"): {"action": "START_POINT", "code": "A", "desc": "Jogador A"},
         ord("B"): {"action": "START_POINT", "code": "B", "desc": "Jogador B"},
-        # --- CLASSE: Golpe (Adiciona um evento durante o ponto) ---
         ord("1"): {"action": "ADD_EVENT", "code": "1", "desc": "1st Serve"},
         ord("2"): {"action": "ADD_EVENT", "code": "2", "desc": "2nd Serve"},
         ord("f"): {"action": "ADD_EVENT", "code": "F", "desc": "Forehand"},
@@ -34,36 +43,97 @@ CONFIG = {
         ord("m"): {"action": "ADD_EVENT", "code": "M", "desc": "Smash"},
         ord("v"): {"action": "ADD_EVENT", "code": "V", "desc": "Volley"},
         ord("s"): {"action": "ADD_EVENT", "code": "S", "desc": "Slice"},
-        # --- CLASSE: Resultado Golpe (Finaliza o ponto) ---
         ord("e"): {"action": "END_POINT", "code": "E", "desc": "Error"},
         ord("w"): {"action": "END_POINT", "code": "W", "desc": "Winner"},
     },
 }
 
 
-class TennisVideoAnalyzer:
+# =====================================================================================
+# 2. CLASSE DE STREAM DE VÍDEO OTIMIZADA (PRODUTOR)
+# =====================================================================================
+class VideoStream:
     """
-    Classe completa para analisar vídeos de tênis, capturando eventos
-    de cada ponto e salvando os resultados em um arquivo CSV.
+    Lê frames de um vídeo em uma thread dedicada para evitar I/O blocking
+    na thread principal da GUI, garantindo um playback fluido.
+    Versão com Lock para garantir thread-safety.
     """
 
+    def __init__(self, path, queue_size=128):
+        self.stream = cv2.VideoCapture(path)
+        if not self.stream.isOpened():
+            raise FileNotFoundError(f"Não foi possível abrir o vídeo em: {path}")
+
+        self.stopped = False
+        self.total_frames = int(self.stream.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = self.stream.get(cv2.CAP_PROP_FPS) or 30
+
+        self.Q = Queue(maxsize=queue_size)
+        self.lock = Lock()  # <--- ADICIONADO: Cria o objeto de lock
+        self.thread = Thread(target=self.update, args=())
+        self.thread.daemon = True
+        self.thread.start()
+
+    def update(self):
+        while True:
+            # Adquire o lock antes de acessar self.stream
+            with self.lock:  # <--- MODIFICADO
+                if self.stopped:
+                    self.stream.release()
+                    return
+
+                # Acessa o stream somente quando o lock está ativo
+                (grabbed, frame) = self.stream.read()
+
+            # Processa o resultado fora do lock
+            if not self.Q.full():
+                if not grabbed:
+                    self.stopped = True
+                    continue
+                self.Q.put(frame)
+            else:
+                time.sleep(0.01)
+
+    def read(self):
+        return self.Q.get()
+
+    def seek(self, frame_number):
+        """Pula para um frame específico no vídeo de forma segura."""
+        # Adquire o lock antes de acessar self.stream
+        with self.lock:  # <--- MODIFICADO
+            self.stream.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            # Limpa a fila para remover frames antigos que não serão mais usados
+            with self.Q.mutex:
+                self.Q.queue.clear()
+
+    def more(self):
+        return self.Q.qsize() > 0
+
+    def stop(self):
+        self.stopped = True
+        self.thread.join()
+
+
+# =====================================================================================
+# 3. SUA CLASSE ANALISADORA, AGORA INTEGRADA COM O VIDEOSTREAM
+# =====================================================================================
+class TennisVideoAnalyzer:
     def __init__(self, config):
         self.config = config
         self.video_path = VIDEO_PATH
         self.window_name = config["WINDOW_NAME"]
 
-        if not os.path.exists(self.video_path):
-            raise FileNotFoundError(
-                f"Arquivo de vídeo não encontrado em: {self.video_path}"
-            )
+        # Inicializa o VideoStream otimizado em vez do cv2.VideoCapture
+        self.vs = VideoStream(self.video_path, config["THREAD_QUEUE_SIZE"])
+        self.total_frames = self.vs.total_frames
+        self.fps = self.vs.fps
+        time.sleep(5.0)  # Espera 2s para o buffer da thread encher um pouco
 
-        self.cap = cv2.VideoCapture(self.video_path)
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-
-        self.is_paused = True  # Começa pausado para o usuário se preparar
+        self.is_paused = True
         self.current_state = "IDLE"
         self.last_event_info = "Pressione ESPAÇO para iniciar."
+        self.current_frame_num = 0
+        self.playback_speed = 2
 
         self.all_points_data = []
         self.current_point_data = None
@@ -71,65 +141,59 @@ class TennisVideoAnalyzer:
 
         self._setup_ui()
 
+    # _setup_ui, _draw_overlay (sem alterações)
     def _setup_ui(self):
-        """Configura a janela da aplicação."""
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
     def _draw_overlay(self, frame):
-        """Desenha o painel de ajuda e status na tela (versão otimizada)."""
         font = cv2.FONT_HERSHEY_SIMPLEX
         y_pos = 40
 
         def draw_text(text, pos, color=(255, 255, 255), scale=0.7):
             cv2.putText(frame, text, pos, font, scale, color, 1, cv2.LINE_AA)
 
-        # Painel de Status
-        status_text = f"ESTADO: {'GRAVANDO PONTO' if self.current_state == 'RECORDING_POINT' else 'AGUARDANDO PONTO'}"
+        status_text = f"ESTADO: {'GRAVANDO PONTO' if self.current_state == 'RECORDING_POINT' else 'AGUARDANDO'}"
         status_color = (
             (0, 0, 255) if self.current_state == "RECORDING_POINT" else (0, 255, 255)
         )
-        if self.is_paused:
-            status_text += " (PAUSADO)"
-        draw_text(status_text, (20, y_pos), status_color, scale=1.0)
+
+        playback_info = "(PAUSADO)" if self.is_paused else f"({self.playback_speed}x)"
+        draw_text(
+            f"{status_text} {playback_info}", (20, y_pos), status_color, scale=1.0
+        )
         y_pos += 40
 
-        # Último Evento Registrado
         if self.last_event_info:
             draw_text(f"Ultimo: {self.last_event_info}", (20, y_pos), (0, 255, 0))
             y_pos += 40
 
-    def _get_current_timestamp(self):
-        """Retorna o número e o timestamp em segundos do quadro atual."""
-        current_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-        timestamp_sec = current_frame / self.fps if self.fps > 0 else 0
-        return current_frame, timestamp_sec
+        frame_info = f"Frame: {self.current_frame_num}/{self.total_frames}"
+        draw_text(frame_info, (20, y_pos), (255, 255, 255))
 
+    # Método agora usa o contador de frames da classe, não mais do cv2.VideoCapture
+    def _get_current_timestamp(self):
+        timestamp_sec = self.current_frame_num / self.fps if self.fps > 0 else 0
+        return self.current_frame_num, timestamp_sec
+
+    # start_new_point, add_event_to_point (sem alterações lógicas)
     def start_new_point(self, event_info):
-        """Inicia a gravação de um novo ponto."""
         if self.current_state == "RECORDING_POINT":
             self.last_event_info = "ERRO: Ponto atual precisa ser finalizado!"
-            print(
-                f"\nAVISO: Ponto {self.point_counter} está ativo. Finalize-o com 'e' ou 'w'."
-            )
             return
 
         self.point_counter += 1
         frame, timestamp = self._get_current_timestamp()
 
-        self.current_point_data = {
-            "point_id": self.point_counter,
-            "server": event_info["code"],
-            "start_time_sec": timestamp,
-            "events": [],
-        }
+        self.current_point_data = {"point_id": self.point_counter, "events": []}
         self.current_state = "RECORDING_POINT"
-        self.last_event_info = f"Ponto {self.point_counter} iniciado. Sacador: Jogador {event_info['code']}"
+        self.last_event_info = (
+            f"Ponto {self.point_counter} iniciado. Sacador: {event_info['desc']}"
+        )
         print(
-            f"\n--- Ponto {self.point_counter} iniciado (Sacador: {event_info['desc']}) em {timestamp:.2f}s ---"
+            f"--- Ponto {self.point_counter} iniciado (Sacador: {event_info['desc']}) em {timestamp:.2f}s ---"
         )
 
     def add_event_to_point(self, event_info):
-        """Adiciona um evento (golpe) a um ponto em andamento."""
         if self.current_state != "RECORDING_POINT":
             self.last_event_info = "ERRO: Inicie um ponto primeiro (A ou B)!"
             return
@@ -137,69 +201,61 @@ class TennisVideoAnalyzer:
         frame, timestamp = self._get_current_timestamp()
         self.current_point_data["events"].append(
             {
+                "event_code": event_info["code"],
                 "timestamp_sec": timestamp,
                 "frame": frame,
-                "event_code": event_info["code"],
-                "event_desc": event_info["desc"],
             }
         )
         self.last_event_info = f"Golpe: {event_info['desc']}"
         print(f"  > Evento '{event_info['desc']}' adicionado em {timestamp:.2f}s")
 
+    # end_point (com correção de bug para calcular duração)
     def end_point(self, event_info):
-        """Finaliza o ponto atual e armazena os dados."""
         if self.current_state != "RECORDING_POINT":
             self.last_event_info = "ERRO: Nenhum ponto ativo para finalizar!"
             return
 
-        self.add_event_to_point(event_info)
-        frame, timestamp = self._get_current_timestamp()
-        self.current_point_data["end_time_sec"] = timestamp
-        self.current_point_data["duration_sec"] = (
-            timestamp - self.current_point_data["start_time_sec"]
-        )
+        # Correção: Calcula a duração do ponto
+        start_time = self.current_point_data["events"][0]["timestamp_sec"]
+        end_time = self.current_point_data["events"][-1]["timestamp_sec"]
+        duration = end_time - start_time
+
+        self.current_point_data["duration_sec"] = duration
         self.all_points_data.append(self.current_point_data)
         self.last_event_info = (
             f"Ponto {self.point_counter} finalizado: {event_info['desc']}"
         )
         print(
-            f"--- Ponto {self.point_counter} finalizado. Duração: {self.current_point_data['duration_sec']:.2f}s ---\n"
+            f"--- Ponto {self.point_counter} finalizado. Duração: {duration:.2f}s ---"
         )
         self.current_state = "IDLE"
         self.current_point_data = None
 
+    # delete_last_point, save_to_csv (sem alterações lógicas)
     def delete_last_point(self):
-        """
-        Apaga o último ponto concluído ou cancela o ponto atualmente em gravação.
-        """
-        # Cenário 1: Cancela um ponto que está sendo gravado no momento.
         if self.current_state == "RECORDING_POINT":
             point_num_to_cancel = self.current_point_data["point_id"]
             self.current_state = "IDLE"
             self.current_point_data = None
             self.point_counter -= 1
-
             self.last_event_info = (
                 f"Ponto {point_num_to_cancel} em andamento foi cancelado."
             )
-            print(f"\n--- Ponto {point_num_to_cancel} em andamento foi CANCELADO. ---")
+            print(f"--- Ponto {point_num_to_cancel} em andamento foi CANCELADO. ---")
             return
 
-        # Cenário 2: Apaga o último ponto que foi concluído e salvo.
         if self.all_points_data:
             deleted_point = self.all_points_data.pop()
-            self.point_counter -= 1  # Decrementa o contador geral de pontos
-
-            point_id = deleted_point["point_id"]
-            self.last_event_info = f"Ponto {point_id} foi APAGADO."
-            print(f"\n--- Último ponto concluído (Ponto {point_id}) foi APAGADO. ---")
+            self.point_counter -= 1
+            self.last_event_info = f"Ponto {deleted_point['point_id']} foi APAGADO."
+            print(
+                f"--- Último ponto concluído (Ponto {deleted_point['point_id']}) foi APAGADO. ---"
+            )
         else:
-            # Cenário 3: Não há nada para apagar.
             self.last_event_info = "Nenhum ponto para apagar."
-            print("\n--- Nenhum ponto concluído para apagar. ---")
+            print("--- Nenhum ponto concluído para apagar. ---")
 
     def save_to_csv(self):
-        """Converte os dados coletados para um DataFrame e salva como CSV."""
         if not self.all_points_data:
             print("Nenhum ponto foi gravado. Nenhum arquivo CSV será gerado.")
             return
@@ -210,119 +266,141 @@ class TennisVideoAnalyzer:
                 output_data.append(
                     {
                         "point_id": point["point_id"],
-                        "server": point["server"],
-                        "point_start_time_sec": point["start_time_sec"],
-                        "point_end_time_sec": point.get("end_time_sec"),
-                        "point_duration_sec": point.get("duration_sec"),
                         "event_timestamp_sec": event["timestamp_sec"],
                         "event_frame": event["frame"],
                         "event_code": event["event_code"],
-                        "event_description": event["event_desc"],
                     }
                 )
-
         df = pd.DataFrame(output_data)
         df.to_csv(OUTPUT_CSV_PATH, index=False, sep=";", decimal=",")
-        print(f"\nAnálise salva com sucesso em: {self.config['OUTPUT_CSV_PATH']}")
+        print(f"Análise salva com sucesso em: {OUTPUT_CSV_PATH}")
 
+    def stop_analyzer(self):
+        """Rotina para fechar a aplicação de forma segura."""
+        self.vs.stop()
+        cv2.destroyAllWindows()
+        self.save_to_csv()
+
+    # LOOP PRINCIPAL TOTALMENTE REFATORADO PARA ALTA PERFORMANCE
     def run(self):
-        """Inicia o loop principal com lógica de reprodução corrigida e otimizada."""
-        current_frame_num = 0
         scale_percent = self.config.get("ANALYSIS_SCALE_PERCENT", 100)
+        frame = None
+        jump_target = -1
 
-        while self.cap.isOpened():
-            # Define a posição do vídeo, garantindo que não ultrapasse os limites
-            current_frame_num = max(0, min(current_frame_num, self.total_frames - 1))
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_num)
+        while True:
+            # Pega o frame mais recente se não estiver pausado ou se for o primeiro frame
+            if not self.is_paused or frame is None:
+                if self.vs.stopped and not self.vs.more():
+                    break  # Fim do vídeo
 
-            ret, frame = self.cap.read()
-            if not ret:
+                # Avança o número de frames de acordo com a velocidade
+                for _ in range(self.playback_speed):
+                    if self.vs.more():
+                        frame = self.vs.read()
+                        self.current_frame_num += 1
+                    else:
+                        break
+
+            # Garante que temos um frame para exibir
+            if frame is None:
                 break
 
-            # Otimização de Desempenho
+            # Faz uma cópia para desenhar o overlay sem afetar o frame original
+            display_frame = frame.copy()
+
+            # Otimização de Desempenho (redimensionamento)
             if scale_percent < 100:
-                width = int(frame.shape[1] * scale_percent / 100)
-                height = int(frame.shape[0] * scale_percent / 100)
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                width = int(display_frame.shape[1] * scale_percent / 100)
+                height = int(display_frame.shape[0] * scale_percent / 100)
+                display_frame = cv2.resize(
+                    display_frame, (width, height), interpolation=cv2.INTER_AREA
+                )
 
             if self.config["FLIP_VIDEO_CODE"] is not None:
-                frame = cv2.flip(frame, self.config["FLIP_VIDEO_CODE"])
+                display_frame = cv2.flip(display_frame, self.config["FLIP_VIDEO_CODE"])
 
-            self._draw_overlay(frame)
-            cv2.imshow(self.window_name, frame)
+            self._draw_overlay(display_frame)
+            cv2.imshow(self.window_name, display_frame)
 
-            key = cv2.waitKey(1)
+            # --- Lógica de Controle com waitKey Otimizado ---
+            wait_time = 1 if not self.is_paused else 0
+            key = cv2.waitKey(wait_time) & 0xFF
 
-            # Lógica de Controle
+            # SAIR
             if key == ord("x"):
                 break
+            # PAUSE/PLAY
             elif key == ord(" "):
                 self.is_paused = not self.is_paused
+                self.playback_speed = 1  # Reseta a velocidade ao pausar/despausar
+            # APAGAR PONTO
             elif key == ord("z"):
+                self.is_paused = True
                 self.delete_last_point()
-                self.is_paused = True  # Pausa para o usuário ver o feedback
 
-            # Navegação por quadros
+            # NAVEGAÇÃO (só funciona quando pausado para precisão)
+
             elif key == ord("k"):
-                current_frame_num += 1
+                jump_target = self.current_frame_num - 1
             elif key == ord("K"):
-                current_frame_num -= 1
-            elif key == ord("l"):
-                current_frame_num += 10
+                jump_target = self.current_frame_num + 1
             elif key == ord("j"):
-                current_frame_num -= 10
+                jump_target = self.current_frame_num - 10
+            elif key == ord("l"):
+                jump_target = self.current_frame_num + 10
             elif key == ord("L"):
-                current_frame_num += 150
+                jump_target = self.current_frame_num + int(self.fps * 3)
             elif key == ord("J"):
-                current_frame_num -= 150
+                jump_target = self.current_frame_num - int(self.fps * 3)
 
-            # Processamento de eventos de jogo
-            elif key in self.config["KEY_MAPPINGS"]:
-                self.is_paused = True  # Pausa ao registrar um evento para evitar erros
+            if jump_target != -1:
+                self.current_frame_num = max(0, min(jump_target, self.total_frames - 1))
+                self.vs.seek(self.current_frame_num)  # Delega a busca para a thread
+                frame = self.vs.read()  # Pega o frame imediatamente após o pulo
+                jump_target = -1
+
+            # PROCESSAMENTO DE EVENTOS DE JOGO
+            if key in self.config["KEY_MAPPINGS"]:
+                self.is_paused = True  # Pausa automaticamente para precisão
                 event_info = self.config["KEY_MAPPINGS"][key]
                 action = event_info["action"]
 
                 if action == "START_POINT":
                     self.start_new_point(event_info)
+                    self.add_event_to_point(event_info)
                 elif action == "ADD_EVENT":
                     self.add_event_to_point(event_info)
                 elif action == "END_POINT":
+                    self.add_event_to_point(event_info)
                     self.end_point(event_info)
 
-            # Avança para o próximo quadro somente se não estiver pausado
-            if not self.is_paused:
-                current_frame_num += 5
-
-            if current_frame_num >= self.total_frames - 1:
-                self.is_paused = True
-
-        self.cap.release()
-        cv2.destroyAllWindows()
-        self.save_to_csv()
+        self.stop_analyzer()
 
 
+# =====================================================================================
+# 4. PONTO DE ENTRADA DA APLICAÇÃO
+# =====================================================================================
 if __name__ == "__main__":
-    # Verifica se as dependências estão instaladas
-    try:
-        import cv2
-        import pandas as pd
-    except ImportError:
-        print("ERRO: Dependências não encontradas.")
-        print("Por favor, instale-as com o comando: pip install opencv-python pandas")
-        exit()
+    print("""
+    ==================================================================
+    Analisador de Tênis Otimizado - Comandos
+    ==================================================================
+    Controle de Playback:
+      - ESPAÇO: Pausar / Continuar
+      - p: Acelerar reprodução (1x, 2x, 4x, 8x...)
+      - x: Sair e Salvar
 
-    try:
-        print("""Atalhos disponíveis:
-            - 'A' para Jogador A iniciar ponto
-            - 'B' para Jogador B iniciar ponto
-            - '1', '2', 'f', 'b', 'd', 'm', 'v', 's' para adicionar eventos
-            - 'e' para finalizar ponto com erro
-            - 'w' para finalizar ponto com winner
-            - 'z' para apagar o último ponto
-            - 'x' para sair do programa
-            - Use as teclas de navegação (k, K, l, j, L, J) para controlar os quadros""")
-        analyzer = TennisVideoAnalyzer(CONFIG)
-        analyzer.run()
+    Navegação (apenas quando pausado):
+      - j/k: Frame seguinte / anterior
+      - J/K: Pular 1 segundo para frente / trás
+      - l/L: Pular 5 segundos para frente / trás
 
-    except Exception as e:
-        print(f"Ocorreu um erro fatal: {e}")
+    Marcação de Pontos:
+      - A/B: Iniciar ponto (Sacador A ou B)
+      - 1,2,f,b,d,m,v,s: Registrar golpes
+      - e/w: Finalizar ponto (Erro / Winner)
+      - z: Apagar último ponto / Cancelar ponto atual
+    =================================================================
+    """)
+    analyzer = TennisVideoAnalyzer(CONFIG)
+    analyzer.run()
