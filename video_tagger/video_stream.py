@@ -1,11 +1,9 @@
 import cv2
-import time
 
 class VideoStream:
     """
-    Wrapper síncrono para o cv2.VideoCapture, com acesso direto aos frames.
+    Wrapper síncrono para o cv2.VideoCapture com leitura otimizada.
     """
-
     def __init__(self, path):
         self.stream = cv2.VideoCapture(path)
         if not self.stream.isOpened():
@@ -14,37 +12,33 @@ class VideoStream:
         self.total_frames = int(self.stream.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.stream.get(cv2.CAP_PROP_FPS) or 30
 
-    def read(self, frame_number=None):
+    def read_sequential(self):
         """
-        Lê um frame do vídeo. Se frame_number for fornecido, pula para esse frame antes de ler.
-        Retorna uma tupla (True, frame) se bem-sucedido, (False, None) se o frame não existir.
+        Lê o próximo frame sequencialmente. Mais rápido para playback.
+        Retorna (True, frame) ou (False, None).
         """
-        overall_start = time.time()
-        seek_time = 0
-        if frame_number is not None:
-            seek_start = time.time()
-            if not 0 <= frame_number < self.total_frames:
-                return False, None  # Frame fora do intervalo
-            if not self.seek(frame_number):
-                return False, None  # Falha ao buscar o frame
+        return self.stream.read()
 
-        ret, frame = self.stream.read()
-        overall_end = time.time()
-        if frame_number is not None:
-            seek_end = time.time()
-            seek_time = (seek_end - seek_start) * 1000
-        print(f"VideoStream.read(): Overall: {(overall_end - overall_start) * 1000:.2f} ms, Seek: {seek_time:.2f} ms")
-        return ret, frame
-
-    def seek(self, frame_number: int) -> bool:
+    def read_at_frame(self, frame_number):
         """
-        Pula para um frame específico. Retorna True se bem-sucedido, False caso contrário.
+        Pula para um frame específico e o lê. Mais lento, use para saltos.
+        Retorna (True, frame) ou (False, None).
         """
         if not 0 <= frame_number < self.total_frames:
-            return False  # Frame fora do intervalo
+            return False, None  # Frame fora do intervalo
+        
         self.stream.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-        # Verificação mais robusta:
-        return int(self.stream.get(cv2.CAP_PROP_POS_FRAMES)) == frame_number
+        current_pos = int(self.stream.get(cv2.CAP_PROP_POS_FRAMES))
+        
+        # A busca pode não ser precisa, então lemos até chegar lá, se necessário
+        if current_pos != frame_number:
+            # Se a diferença for grande, a busca falhou de forma mais séria
+            if abs(current_pos - frame_number) > 10:
+                 print(f"Alerta: Falha ao buscar precisamente o frame {frame_number}. Posição atual: {current_pos}")
+                 return False, None
+        
+        return self.stream.read()
 
     def stop(self):
+        """Libera o recurso de vídeo."""
         self.stream.release()
