@@ -18,7 +18,7 @@ class CSVHandler:
             points = []
             for point_id, events in grouped_points:
                 point_data = {
-                    "point_id": point_id,
+                    "point_id": int(point_id),
                     "server": events.iloc[0]["event_code"],
                     "events": events.to_dict("records"),
                 }
@@ -27,7 +27,7 @@ class CSVHandler:
         except FileNotFoundError:
             return []
 
-    def save_csv(self, points: List[Dict]):
+    def save_csv(self, all_points_data: List[Dict]):
         """Salva os dados no CSV, preservando os existentes."""
         try:
             existing_df = pd.read_csv(self.csv_path, sep=";", decimal=",")
@@ -35,7 +35,7 @@ class CSVHandler:
             existing_df = pd.DataFrame()
 
         new_data = []
-        for point in points:
+        for point in all_points_data:
             for event in point["events"]:
                 new_data.append(
                     {
@@ -49,4 +49,5 @@ class CSVHandler:
         combined_df = (
             pd.concat([existing_df, new_df]).drop_duplicates().reset_index(drop=True)
         )
+        print(f"Análise salva com sucesso em: {self.csv_path}")
         combined_df.to_csv(self.csv_path, index=False, sep=";", decimal=",")

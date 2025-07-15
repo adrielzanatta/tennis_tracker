@@ -1,78 +1,50 @@
 import cv2
 import time
-from threading import Thread, Lock
-from queue import Queue
-
 
 class VideoStream:
     """
-    Lê frames de um vídeo em uma thread dedicada para evitar I/O blocking
-    na thread principal da GUI, garantindo um playback fluido.
-    Versão com Lock para garantir thread-safety.
+    Wrapper síncrono para o cv2.VideoCapture, com acesso direto aos frames.
     """
 
-    def __init__(self, path, queue_size=128):
+    def __init__(self, path):
         self.stream = cv2.VideoCapture(path)
         if not self.stream.isOpened():
             raise FileNotFoundError(f"Não foi possível abrir o vídeo em: {path}")
 
-        self.stopped = False
         self.total_frames = int(self.stream.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.stream.get(cv2.CAP_PROP_FPS) or 30
 
-        self.Q = Queue(maxsize=queue_size)
-        self.lock = Lock()  # <--- ADICIONADO: Cria o objeto de lock
-        self.thread = Thread(target=self.update, args=())
-        self.thread.daemon = True
-        self.thread.start()
+    def read(self, frame_number=None):
+        """
+        Lê um frame do vídeo. Se frame_number for fornecido, pula para esse frame antes de ler.
+        Retorna uma tupla (True, frame) se bem-sucedido, (False, None) se o frame não existir.
+        """
+        overall_start = time.time()
+        seek_time = 0
+        if frame_number is not None:
+            seek_start = time.time()
+            if not 0 <= frame_number < self.total_frames:
+                return False, None  # Frame fora do intervalo
+            if not self.seek(frame_number):
+                return False, None  # Falha ao buscar o frame
 
-    def update(self):
-        while True:
-            # Adquire o lock antes de acessar self.stream
-            with self.lock:
-                if self.stopped:
-                    self.stream.release()
-                    return
+        ret, frame = self.stream.read()
+        overall_end = time.time()
+        if frame_number is not None:
+            seek_end = time.time()
+            seek_time = (seek_end - seek_start) * 1000
+        print(f"VideoStream.read(): Overall: {(overall_end - overall_start) * 1000:.2f} ms, Seek: {seek_time:.2f} ms")
+        return ret, frame
 
-                # Acessa o stream somente quando o lock está ativo
-                (grabbed, frame) = self.stream.read()
-
-            # Processa o resultado fora do lock
-            if not self.Q.full():
-                if not grabbed:
-                    self.stopped = True
-                    continue
-                self.Q.put(frame)
-            else:
-                time.sleep(0.01)
-
-    def read(self):
-        return self.Q.get()
-
-    def seek(self, frame_number):
-        """Pula para um frame específico no vídeo de forma segura."""
-        with self.lock:
-            self.stream.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            # Verifica se o frame foi ajustado corretamente
-            if self.stream.get(cv2.CAP_PROP_POS_FRAMES) != frame_number:
-                raise RuntimeError(f"Falha ao buscar o frame {frame_number}.")
-            # Limpa a fila de forma segura
-            while not self.Q.empty():
-                self.Q.get()
-
-            # Preenche o buffer novamente após o seek
-            for _ in range(
-                min(self.Q.maxsize, 10)
-            ):  # Lê até 10 frames para preencher o buffer
-                grabbed, frame = self.stream.read()
-                if not grabbed:
-                    self.stopped = True
-                    break
-                self.Q.put(frame)
-
-    def more(self):
-        return self.Q.qsize() > 0
+    def seek(self, frame_number: int) -> bool:
+        """
+        Pula para um frame específico. Retorna True se bem-sucedido, False caso contrário.
+        """
+        if not 0 <= frame_number < self.total_frames:
+            return False  # Frame fora do intervalo
+        self.stream.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        # Verificação mais robusta:
+        return int(self.stream.get(cv2.CAP_PROP_POS_FRAMES)) == frame_number
 
     def stop(self):
-        self.stopped = True
-        self.thread.join()
+        self.stream.release()

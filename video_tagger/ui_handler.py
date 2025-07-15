@@ -1,5 +1,6 @@
 import cv2
 from typing import Dict
+import numpy as np
 
 
 class UIHandler:
@@ -10,24 +11,31 @@ class UIHandler:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
 
     def draw_overlay(
-        self, frame, current_state: str, last_event_info: str, frame_info: str
+        self,
+        frame,
+        current_state: str,
+        is_paused: bool,
+        frame_increment: int,
+        last_event_info: str,
+        frame_info: str,
     ):
         """Desenha a sobreposição de informações no frame."""
         font = cv2.FONT_HERSHEY_SIMPLEX
         y_pos = 30
 
         def draw_text(text, pos, color=(255, 255, 255), scale=0.7):
-            cv2.putText(frame, text, pos, font, scale, color, 1, cv2.LINE_AA)
+            cv2.putText(frame, text, pos, font, scale, color, 2, cv2.LINE_AA)
 
-        status_text = f"ESTADO: {current_state}"
+        status_text = f"ESTADO: {'GRAVANDO PONTO' if current_state == 'RECORDING_POINT' else 'AGUARDANDO'}"
         status_color = (
-            (0, 255, 0) if current_state == "GRAVANDO PONTO" else (0, 255, 255)
+            (0, 255, 0) if current_state == "RECORDING_POINT" else (0, 255, 255)
         )
-        draw_text(status_text, (20, y_pos), status_color, scale=1.0)
+        playback_info = "(PAUSADO)" if is_paused else f"({frame_increment}x)"
+        draw_text(f"{status_text} {playback_info}", (20, y_pos), status_color, scale=1.0)
         y_pos += 40
 
         if last_event_info:
-            draw_text(f"Ultimo: {last_event_info}", (20, y_pos), (50, 205, 255))
+            draw_text(f"Ultimo: {last_event_info}", (20, y_pos), (50, 205, 255), scale=0.8)
             y_pos += 40
 
         draw_text(frame_info, (20, y_pos), (255, 255, 255))
@@ -120,3 +128,13 @@ class UIHandler:
 
         draw_player_row(start_y + 35, score_data["pA"])
         draw_player_row(start_y + 70, score_data["pB"])
+
+    def show_frame(self, frame):
+        """Exibe o frame na janela."""
+        if frame is not None and isinstance(frame, np.ndarray):
+            # Garante que o tipo de dados é uint8, que é o que o cv2.imshow espera.
+            if frame.dtype != np.uint8:
+                frame = frame.astype(np.uint8)
+            cv2.imshow(self.window_name, frame)
+        # else: # Opcional: Adicionar um log para depuração
+        #     print("UIHandler.show_frame recebeu um frame None ou inválido.")

@@ -1,36 +1,71 @@
 import cv2
-import pandas as pd
 import time
 import copy
-import os
 
+import os
+import subprocess
 # Importações dos módulos refatorados
 from config import CONFIG, VIDEO_PATH, OUTPUT_CSV_PATH
 from video_stream import VideoStream
 from game import TennisGame
 from scoreboard import Scoreboard
+from ui_handler import UIHandler
+from csv_handler import CSVHandler
 
 
 class TennisVideoAnalyzer:
     def __init__(self, config):
         self.config = config
-        self.video_path = VIDEO_PATH
+
+        # --- LÓGICA DE TRANSCODIFICAÇÃO AUTOMÁTICA ---
+        original_video_path = VIDEO_PATH
+        video_dir = os.path.dirname(original_video_path)
+        video_filename = os.path.basename(original_video_path)
+        video_name, _ = os.path.splitext(video_filename)
+
+        # Define o caminho para o vídeo otimizado
+        optimized_video_path = os.path.join(video_dir, f"{video_name}_optimized_720p.mp4")
+        self.video_path = original_video_path # Padrão
+
+        if not os.path.exists(optimized_video_path):
+            print(f"Versão otimizada não encontrada. Transcodificando '{original_video_path}'...")
+            try:
+                command = [
+                    "ffmpeg", "-i", original_video_path,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "copy", "-vf", "scale=-1:720", # Preserva o aspect ratio
+                    optimized_video_path
+                ]
+                # Roda o comando e suprime a saída normal, mas mostra erros
+                subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                print(f"Vídeo transcodificado com sucesso para: {optimized_video_path}")
+                self.video_path = optimized_video_path
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print("\nERRO: Falha ao transcodificar o vídeo com ffmpeg.")
+                print("Certifique-se de que o ffmpeg está instalado e no PATH do sistema.")
+                if isinstance(e, subprocess.CalledProcessError):
+                    print(f"Detalhe do erro do FFmpeg:\n{e.stderr.decode()}")
+                print("Continuando a análise com o vídeo original (pode ser lento).\n")
+        else:
+            print(f"Usando versão otimizada do vídeo: {optimized_video_path}")
+            self.video_path = optimized_video_path
+
         self.window_name = config["WINDOW_NAME"]
+        # --- INICIALIZAÇÃO DOS HANDLERS ---
+        self.csv_handler = CSVHandler(OUTPUT_CSV_PATH)
 
         # Inicializa o VideoStream otimizado em vez do cv2.VideoCapture
-        self.vs = VideoStream(self.video_path, config["THREAD_QUEUE_SIZE"])
-        if not self.vs.stream.isOpened():
-            raise FileNotFoundError(f"Erro ao abrir o vídeo: {self.video_path}")
+        self.vs = VideoStream(self.video_path)  # PyAV will raise an error if it fails to open the video
+
         print(f"Vídeo carregado com sucesso: {self.video_path}")
         self.total_frames = self.vs.total_frames or 1
         self.fps = self.vs.fps
-        time.sleep(5.0)  # Espera 2s para o buffer da thread encher um pouco
 
         self.is_paused = True
         self.current_state = "IDLE"
         self.last_event_info = "Pressione ESPAÇO para iniciar."
         self.current_frame_num = 0
-        self.playback_speed = 1
+        self.frame_increment = 1
 
         self.all_points_data = []
         self.current_point_data = None
@@ -45,135 +80,11 @@ class TennisVideoAnalyzer:
 
         self.current_player = None
 
-        self._setup_ui()
-
-    def _setup_ui(self):
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-
-    def _draw_overlay(self, frame):
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        y_pos = 30
-
-        def draw_text(text, pos, color=(255, 255, 255), scale=0.7):
-            cv2.putText(frame, text, pos, font, scale, color, 1, cv2.LINE_AA)
-
-        status_text = f"ESTADO: {'GRAVANDO PONTO' if self.current_state == 'RECORDING_POINT' else 'AGUARDANDO'}"
-        status_color = (
-            (0, 255, 0) if self.current_state == "RECORDING_POINT" else (0, 255, 255)
-        )
-
-        playback_info = "(PAUSADO)" if self.is_paused else f"({self.playback_speed}x)"
-        draw_text(
-            f"{status_text} {playback_info}", (20, y_pos), status_color, scale=1.0
-        )
-        y_pos += 40
-
-        if self.last_event_info:
-            draw_text(f"Ultimo: {self.last_event_info}", (20, y_pos), (50, 205, 255))
-            y_pos += 40
-
-        frame_info = f"Frame: {self.current_frame_num}/{self.total_frames}"
-        draw_text(frame_info, (20, y_pos), (255, 255, 255))
-
-        # --- DESENHAR O PLACAR ---
-        self._draw_wimbledon_scoreboard(frame)
-
-    def _draw_wimbledon_scoreboard(self, frame):
-        # Cores (BGR)
-        WIMBLEDON_GREEN = (44, 88, 0)
-        WHITE = (255, 255, 255)
-        YELLOW = (0, 255, 255)
-        FONT = cv2.FONT_HERSHEY_DUPLEX  # Fonte mais estilizada
-
-        # Pega as dimensões do frame para posicionar o placar no canto inferior esquerdo
-        frame_h, frame_w, _ = frame.shape
-        board_h = 85
-        board_w = 450
-        start_x = 20
-        start_y = frame_h - board_h - 20  # 20px de margem inferior
-
-        # Desenha o retângulo de fundo com transparência
-        overlay = frame.copy()
-        cv2.rectangle(
-            overlay,
-            (start_x, start_y),
-            (start_x + board_w, start_y + board_h),
-            WIMBLEDON_GREEN,
-            -1,
-        )
-        alpha = 0.8
-        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-
-        # Pega os dados do placar
-        score_data = self.scoreboard_presenter.get_score_data(self.display_game)
-
-        if score_data.get("match_over"):
-            winner_text = f"VENCEDOR: {score_data['winner']}"
-            (w, h), _ = cv2.getTextSize(winner_text, FONT, 0.8, 2)
-            text_x = start_x + (board_w - w) // 2
-            text_y = start_y + (board_h + h) // 2
-            cv2.putText(
-                frame, winner_text, (text_x, text_y), FONT, 0.8, YELLOW, 2, cv2.LINE_AA
-            )
-            return
-
-        # Posições das colunas
-        col_name = start_x + 25
-        col_sets_start = col_name + 150
-        col_games = col_sets_start + 100
-        col_points = col_games + 60
-
-        def draw_player_row(y_pos, player_data):
-            cv2.putText(
-                frame,
-                player_data["name"],
-                (col_name, y_pos),
-                FONT,
-                0.6,
-                WHITE,
-                1,
-                cv2.LINE_AA,
-            )
-            set_x_offset = 0
-            for s in player_data["sets_hist"]:
-                cv2.putText(
-                    frame,
-                    str(s),
-                    (col_sets_start + set_x_offset, y_pos),
-                    FONT,
-                    0.7,
-                    WHITE,
-                    2,
-                    cv2.LINE_AA,
-                )
-                set_x_offset += 35
-            cv2.putText(
-                frame,
-                str(player_data["games"]),
-                (col_games, y_pos),
-                FONT,
-                0.7,
-                WHITE,
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                player_data["points_str"],
-                (col_points, y_pos),
-                FONT,
-                0.7,
-                YELLOW,
-                2,
-                cv2.LINE_AA,
-            )
-            if player_data["is_server"]:
-                cv2.circle(frame, (col_name - 15, y_pos - 5), 4, YELLOW, -1)
-
-        draw_player_row(start_y + 35, score_data["pA"])
-        draw_player_row(start_y + 70, score_data["pB"])
+        # O UIHandler agora é responsável por criar a janela
+        self.ui_handler = UIHandler(self.window_name)
 
     def _get_current_timestamp(self):
+        """Calculates the current timestamp in seconds based on the current frame number."""
         timestamp_sec = self.current_frame_num / self.fps if self.fps > 0 else 0
         return self.current_frame_num, timestamp_sec
 
@@ -186,9 +97,8 @@ class TennisVideoAnalyzer:
         frame, timestamp = self._get_current_timestamp()
 
         self.current_player = event_info["code"]
-        self.current_point_data = {
+        self.current_point_data = {  # Initialize current point data
             "point_id": self.point_counter,
-            "server": self.current_player,
             "events": [],
         }
 
@@ -200,8 +110,11 @@ class TennisVideoAnalyzer:
         print(
             f"--- Ponto {self.point_counter} iniciado (Sacador: {event_info['desc']}) em {timestamp:.2f}s ---"
         )
+        # Adiciona o evento de início de ponto
+        self.add_event_to_point(event_info)
 
     def add_event_to_point(self, event_info):
+        """Adds a new event to the current point."""
         if self.current_state != "RECORDING_POINT":
             self.last_event_info = "ERRO: Inicie um ponto primeiro (A ou B)!"
             return
@@ -210,8 +123,8 @@ class TennisVideoAnalyzer:
         self.current_point_data["events"].append(
             {
                 "event_code": event_info["code"],
-                "timestamp_sec": timestamp,
-                "frame": frame,
+                "event_timestamp_sec": timestamp,
+                "event_frame": frame,
             }
         )
         self.last_event_info = f"Golpe: {event_info['desc']}"
@@ -220,7 +133,7 @@ class TennisVideoAnalyzer:
         self.current_player = "B" if self.current_player == "A" else "A"
 
     def point_winnner(self, point_data):
-        # --- LÓGICA PARA DETERMINAR O VENCEDOR (conforme solicitado) ---
+        """Determines the winner of the point based on the last event."""
         server = point_data["events"][0]["event_code"]
         receiver = "B" if server == "A" else "A"
         num_shots = len(point_data["events"])
@@ -235,9 +148,13 @@ class TennisVideoAnalyzer:
         return point_winner
 
     def end_point(self, event_info):
+        """Ends the current point, updates the game state, and saves data."""
         if self.current_state != "RECORDING_POINT":
             self.last_event_info = "ERRO: Nenhum ponto ativo para finalizar!"
             return
+
+        # Adiciona o evento final (Winner/Error) à lista de eventos do ponto
+        self.add_event_to_point(event_info)
 
         point_winner = self.point_winnner(self.current_point_data)
 
@@ -258,7 +175,7 @@ class TennisVideoAnalyzer:
         self.current_point_data = None
 
     def delete_last_point(self):
-        """Apaga o último ponto registrado, incluindo os carregados do CSV."""
+        """Deletes the last recorded point, including those loaded from CSV."""
         if self.current_state == "RECORDING_POINT":
             point_num_to_cancel = self.current_point_data["point_id"]
             self.current_state = "IDLE"
@@ -295,6 +212,7 @@ class TennisVideoAnalyzer:
             print("--- Nenhum ponto concluído para apagar. ---")
 
     def _update_game_for_frame(self):
+        """Updates the displayed game state to match the current frame."""
         for frame, game_state in reversed(self.game_history):
             if self.current_frame_num >= frame:
                 self.display_game = game_state
@@ -302,103 +220,59 @@ class TennisVideoAnalyzer:
         self.display_game.reset_match()
 
     def save_to_csv(self):
-        """Salva os dados de análise no arquivo CSV, preservando os dados existentes."""
+        """Delega o salvamento dos dados para o CSVHandler."""
         if not self.all_points_data:
             print("Nenhum ponto foi gravado. Nenhum arquivo CSV será gerado.")
             return
-
-        # Carrega os dados existentes do CSV, se houver
-        if os.path.exists(OUTPUT_CSV_PATH):
-            existing_df = pd.read_csv(OUTPUT_CSV_PATH, sep=";", decimal=",")
-        else:
-            existing_df = pd.DataFrame()
-
-        # Converte os novos dados para DataFrame
-        new_data = []
-        for point in self.all_points_data:
-            for event in point["events"]:
-                new_data.append(
-                    {
-                        "point_id": point["point_id"],
-                        "event_code": event["event_code"],
-                        "event_frame": event["frame"],
-                        "event_timestamp_sec": event["timestamp_sec"],
-                    }
-                )
-        new_df = pd.DataFrame(new_data)
-
-        # Combina os dados existentes com os novos
-        combined_df = (
-            pd.concat([existing_df, new_df]).drop_duplicates().reset_index(drop=True)
-        )
-
-        # Salva o DataFrame combinado no CSV
-        combined_df.to_csv(OUTPUT_CSV_PATH, index=False, sep=";", decimal=",")
-        print(f"Análise salva com sucesso em: {OUTPUT_CSV_PATH}")
+        self.csv_handler.save_csv(self.all_points_data)
 
     def load_from_csv(self):
-        """Carrega eventos de um arquivo CSV e inicializa o estado do jogo."""
-        if not os.path.exists(OUTPUT_CSV_PATH):
-            print(f"Nenhum arquivo CSV encontrado em: {OUTPUT_CSV_PATH}")
-            return
-
-        df = pd.read_csv(OUTPUT_CSV_PATH, sep=";", decimal=",")
-        if df.empty:
-            print("O arquivo CSV está vazio. Nenhum dado para carregar.")
+        """Delega o carregamento do CSV para o CSVHandler e processa os dados."""
+        loaded_points = self.csv_handler.load_csv()
+        if not loaded_points:
+            print("Nenhum dado carregado do CSV.")
             return
 
         print(f"Carregando estado do CSV: {OUTPUT_CSV_PATH}")
-        # Inicializa o estado do jogo e os pontos registrados
-        self.all_points_data = []
+        self.all_points_data = loaded_points
         self.game.reset_match()
         self.game_history = []
 
-        grouped_points = df.groupby("point_id")
-        for point_id, events in grouped_points:
-            point_data = {
-                "point_id": point_id,
-                "server": events.iloc[0]["event_code"],
-                "events": [],
-            }
-            for _, event in events.iterrows():
-                point_data["events"].append(
-                    {
-                        "event_code": event["event_code"],
-                        "timestamp_sec": event["event_timestamp_sec"],
-                        "frame": event["event_frame"],
-                    }
-                )
-            self.all_points_data.append(point_data)
-
+        for point_data in self.all_points_data:
             # Atualiza o estado do jogo com base no último evento do ponto
             last_event = point_data["events"][-1]
             if last_event["event_code"] in ["W", "E"]:
-                self.game.point_won_by(
-                    point_data["server"]
-                    if last_event["event_code"] == "W"
-                    else ("B" if point_data["server"] == "A" else "A")
-                )
-                frame_of_point_end = point_data["events"][-1]["frame"]
+                point_winner = self.point_winnner(point_data)
+                self.game.point_won_by(point_winner)
+                frame_of_point_end = point_data["events"][-1]["event_frame"]
                 self.game_history.append((frame_of_point_end, copy.deepcopy(self.game)))
 
         # Define o frame atual para o último ponto registrado
         if self.all_points_data:
-            last_frame = self.all_points_data[-1]["events"][-1]["frame"]
-            if last_frame >= self.total_frames:
-                print(
-                    f"Frame {last_frame} fora do intervalo do vídeo. Ajustando para o final."
-                )
-                last_frame = self.total_frames - 1
-            self.current_frame_num = last_frame
-            self.point_counter = max([p["point_id"] for p in self.all_points_data])
-            self.vs.seek(self.current_frame_num)
+            # Find the latest frame number among all events
+            latest_frame = max(
+                event["event_frame"]
+                for point in self.all_points_data
+                for event in point["events"]
+            )
+
+            self.current_frame_num = min(latest_frame, self.total_frames - 1)
+            self.point_counter = max([p["point_id"] for p in self.all_points_data], default=0)
+
+            # Ensure seeking is successful
+            if not self.vs.seek(self.current_frame_num):
+                print(f"Warning: Failed to seek to frame {self.current_frame_num} after loading from CSV.")
+
+            # Read a frame to ensure the stream is correctly positioned and a frame is available
+            ret, frame = self.vs.read(self.current_frame_num)
             print(f"Estado carregado. Iniciando do frame {self.current_frame_num}.")
             time.sleep(0.1)  # Aguarda 1 segundo para o buffer ser preenchido
-
+        
     def stop_analyzer(self):
         self.vs.stop()
         cv2.destroyAllWindows()
         self.save_to_csv()
+
 
     def run(self):
         scale_percent = self.config.get("ANALYSIS_SCALE_PERCENT", 100)
@@ -410,44 +284,101 @@ class TennisVideoAnalyzer:
         self.load_from_csv()
         print("Carregamento do estado concluído. Iniciando reprodução...")
 
+        # Ler o frame inicial (seja o 0 ou o carregado do CSV)
+        ret, frame = self.vs.read(self.current_frame_num)
+        if not ret or frame is None:
+            print(f"ERRO CRÍTICO: Não foi possível ler o frame inicial ({self.current_frame_num}). Saindo.")
+            return  # Sai do método run se o frame inicial não puder ser carregado
+        
         while True:
-            if not self.is_paused or frame is None:
-                if self.vs.stopped and not self.vs.more():
-                    print("Fim do vídeo ou buffer vazio.")
-                    break
+            loop_start_time = time.time()  # FULL LOOP start time
 
-                for _ in range(self.playback_speed):
-                    if self.vs.more():
-                        frame = self.vs.read()
-                        self.current_frame_num += 1
+            read_start_time = time.time()
+
+            processing_times = []  # ADD: create an empty list before the loop
+            start_time = time.time()  # START: Mede o tempo de início do loop
+
+            # Attempt to read a frame if not paused or if frame is None (e.g., first frame or after seek)
+            if not self.is_paused or frame is None or jump_target != -1: # Added jump_target condition
+                if not self.is_paused:
+                    # Calculate next frame for playback if not paused
+                    self.current_frame_num += self.frame_increment
+                    if self.current_frame_num >= self.total_frames:
+                        self.current_frame_num = self.total_frames - 1
+                else:
+                    # If paused and frame is None, retry current frame
+                    # Note: In pause, current_frame_num is maintained, no increment
+                    next_frame = self.current_frame_num 
+                
+                # Attempt to read the frame with retries
+                retries = 3
+                ret, frame = False, None  # Initialize for the loop
+                for attempt in range(retries):
+                    ret, frame = self.vs.read(self.current_frame_num)
+                    if ret and frame is not None:
+                        break  # Exit retry loop on success
                     else:
-                        print("Buffer vazio durante a reprodução.")
-                        break
+                        print(f"Retry {attempt + 1}/{retries} reading frame {self.current_frame_num}. Ret: {ret}")
+                        time.sleep(0.1)  # Short delay before retrying
+                 # If reading failed after retries, break the loop
+                if not ret or frame is None:
+                    print(f"Error: Failed to retrieve frame {self.current_frame_num} after {retries} retries.")
+                    break
+                read_end_time = time.time()
+            else: # If paused and frame is not None, and no jump, no new read is needed
+                read_end_time = read_start_time # No new read, so end time is same as start for timing purposes
 
-                # Atualiza o placar de exibição durante a reprodução normal
-                self._update_game_for_frame()
+            self._update_game_for_frame()  # Update game state *before* drawing
 
-            if frame is None:
-                print("Nenhum frame disponível para exibição.")
-                break
+            # Always start from a copy of the current frame
+            if frame is not None:  # Ensure frame is valid before processing
+                display_frame = frame.copy() #copy the original frame
 
-            display_frame = frame.copy()
+                if scale_percent < 100:
+                    width = int(display_frame.shape[1] * scale_percent / 100)
+                    height = int(display_frame.shape[0] * scale_percent / 100)
+                    display_frame = cv2.resize(display_frame, (width, height), interpolation=cv2.INTER_AREA)
 
-            # Verifica se o frame foi carregado corretamente antes de acessar suas propriedades
-            if frame is not None and scale_percent < 100:
-                width = int(frame.shape[1] * scale_percent / 100)
-                height = int(frame.shape[0] * scale_percent / 100)
-                display_frame = cv2.resize(
-                    frame, (width, height), interpolation=cv2.INTER_AREA
-                )
+                if self.config["FLIP_VIDEO_CODE"] is not None:
+                    display_frame = cv2.flip(display_frame, self.config["FLIP_VIDEO_CODE"])
+            else:
+                display_frame = None # Handle case where frame is still None after retries
 
-            if self.config["FLIP_VIDEO_CODE"] is not None:
-                display_frame = cv2.flip(display_frame, self.config["FLIP_VIDEO_CODE"])
+            ui_start_time = time.time()  # START: UI drawing start time
+            
+            if display_frame is not None: # Ensure valid frame before drawing overlay
+                # --- DELEGA O DESENHO PARA O UI HANDLER ---
+                self.ui_handler.draw_overlay(
+                display_frame,
+                current_state=self.current_state,
+                is_paused=self.is_paused,
+                frame_increment=self.frame_increment,
+                last_event_info=self.last_event_info,
+                frame_info=f"Frame: {self.current_frame_num}/{self.total_frames}",
+            )
 
-            self._draw_overlay(display_frame)
-            cv2.imshow(self.window_name, display_frame)
+            score_data = self.scoreboard_presenter.get_score_data(self.display_game)
+            if display_frame is not None: # Ensure valid frame before drawing scoreboard
+                self.ui_handler.draw_scoreboard(display_frame, score_data)
 
-            wait_time = 1 if not self.is_paused else 0
+                self.ui_handler.show_frame(display_frame) # Always show the UI Frame
+
+            ui_end_time = time.time()  # END: UI drawing end time
+            
+            # --- CÁLCULO DINÂMICO DO TEMPO DE ESPERA PARA SINCRONIZAÇÃO COM O FPS ---
+            wait_start_time = time.time()  # START: Wait time calculation start
+            if self.is_paused:
+                wait_time = 0  # Pausado, espera indefinidamente por uma tecla
+            else:
+                # Calcula o tempo que o processamento do frame levou
+                elapsed_ms = (time.time() - start_time) * 1000
+                
+                # Calcula a duração que o frame DEVERIA ter, considerando o avanço (frame_increment)
+                target_duration_ms = (1000 / self.fps) * self.frame_increment
+                
+                # O tempo a esperar é a diferença. Se for negativo, o processamento está atrasado.
+                time_to_wait = target_duration_ms - elapsed_ms
+                wait_time = max(1, int(time_to_wait))  # Ensure wait_time is at least 1
             key = cv2.waitKey(wait_time) & 0xFF
 
             if key == ord("x"):
@@ -455,13 +386,19 @@ class TennisVideoAnalyzer:
                 break
             elif key == ord(" "):
                 self.is_paused = not self.is_paused
-                self.playback_speed = 1
+                self.frame_increment = 1
+            elif key == ord("p"):
+                if not self.is_paused:
+                    if self.frame_increment >= 4:
+                        self.frame_increment = 1
+                    else:
+                        self.frame_increment *= 2
             elif key == ord("z"):
                 self.is_paused = True
                 self.delete_last_point()
-            elif key == ord("k"):
-                jump_target = self.current_frame_num - 1
             elif key == ord("K"):
+                jump_target = self.current_frame_num - 1
+            elif key == ord("k"):
                 jump_target = self.current_frame_num + 1
             elif key == ord("j"):
                 jump_target = self.current_frame_num - 10
@@ -473,9 +410,11 @@ class TennisVideoAnalyzer:
                 jump_target = self.current_frame_num - int(self.fps * 3)
 
             if jump_target != -1:
-                self.current_frame_num = max(0, min(jump_target, self.total_frames - 1))
-                self.vs.seek(self.current_frame_num)
-                frame = self.vs.read()
+                target_frame = max(0, min(jump_target, self.total_frames - 1))
+                ret, frame = self.vs.read(target_frame)
+                if ret:
+                    self.current_frame_num = target_frame
+
                 self._update_game_for_frame()
                 jump_target = -1
 
@@ -485,12 +424,22 @@ class TennisVideoAnalyzer:
                 action = event_info["action"]
 
                 if action == "START_POINT":
-                    self.start_new_point(event_info)
-
-                self.add_event_to_point(event_info)
-
-                if action == "END_POINT":
+                    self.start_new_point(event_info)  # Já adiciona o primeiro evento
+                elif action == "ADD_EVENT":
+                    self.add_event_to_point(event_info)
+                elif action == "END_POINT":
                     self.end_point(event_info)
+
+            wait_end_time = time.time()  # END: Wait time calculation end
+            loop_end_time = time.time()
+            read_duration = (read_end_time - read_start_time) * 1000
+            ui_duration = (ui_end_time - ui_start_time) * 1000
+            wait_duration = (wait_end_time - wait_start_time) * 1000
+            full_loop_duration = (loop_end_time - loop_start_time) * 1000
+            if not self.is_paused:
+                print(
+                    f"Read: {read_duration:.2f}ms, UI: {ui_duration:.2f}ms, Wait: {wait_duration:.2f}ms, Full Loop: {full_loop_duration:.2f}ms"
+                )
 
         self.stop_analyzer()
 
@@ -502,13 +451,13 @@ if __name__ == "__main__":
     ==================================================================
     Controle de Playback:
       - ESPAÇO: Pausar / Continuar
-      - p: Acelerar reprodução (1x, 2x, 4x, 8x...)
+      - p: Acelerar reprodução (1x, 2x, 4x, 8x, ciclo)
       - x: Sair e Salvar
 
     Navegação (apenas quando pausado):
-      - j/k: Frame seguinte / anterior
-      - J/K: Pular 1 segundo para frente / trás
-      - l/L: Pular 5 segundos para frente / trás
+      - k/K: Frame anterior / seguinte
+      - j/l: Pular 10 frames para trás / frente
+      - J/L: Pular 3 segundos para trás / frente
 
     Marcação de Pontos:
       - A/B: Iniciar ponto (Sacador A ou B)
@@ -517,5 +466,6 @@ if __name__ == "__main__":
       - z: Apagar último ponto / Cancelar ponto atual
     =================================================================
     """)
+
     analyzer = TennisVideoAnalyzer(CONFIG)
     analyzer.run()

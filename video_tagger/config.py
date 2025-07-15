@@ -32,8 +32,7 @@ CONFIG = {
     # --- JOGADORES ---
     "PLAYER_A_NAME": "JOGADOR A",
     "PLAYER_B_NAME": "JOGADOR B",
-    "ANALYSIS_SCALE_PERCENT": 100,  # Reduz para 30% para análise, muito mais rápido
-    "THREAD_QUEUE_SIZE": 300,  # Frames para bufferizar em memória. 128 ou 256 é um bom valor.
+    "ANALYSIS_SCALE_PERCENT": 60,  # Reduz para 30% para análise, muito mais rápido
     # --- CONTROLES ---
     "KEY_MAPPINGS": {
         # ... (seu mapeamento de teclas permanece o mesmo) ...
