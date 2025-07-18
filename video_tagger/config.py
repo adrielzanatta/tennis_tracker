@@ -1,41 +1,17 @@
-import sys
-import os
-
-# =====================================================================================
-# 1. CONFIGURAÇÃO GLOBAL DA APLICAÇÃO
-# =====================================================================================
-if len(sys.argv) > 1:
-    VIDEO_PATH = sys.argv[1]
-else:
-    raise ValueError(
-        "Por favor, forneça o caminho do vídeo como argumento: python main.py <caminho_do_video>"
-    )
-
-# Geração mais robusta do caminho de saída do CSV
-video_filename = os.path.basename(VIDEO_PATH)
-video_name_without_ext = os.path.splitext(video_filename)[0]
-OUTPUT_CSV_DIR = "../Analises/temp"
-os.makedirs(OUTPUT_CSV_DIR, exist_ok=True)  # Garante que o diretório existe
-OUTPUT_CSV_PATH = os.path.join(
-    OUTPUT_CSV_DIR, f"{video_name_without_ext}_analisado.csv"
-)
-print(f"Arquivo de saída será: {OUTPUT_CSV_PATH}")
-
-print(f"Caminho do vídeo: {VIDEO_PATH}")
-print(f"Caminho do CSV: {OUTPUT_CSV_PATH}")
-
 CONFIG = {
     # --- JANELA E VÍDEO ---
     "WINDOW_NAME": "Analisador de Golpes - Tênis (Otimizado)",
     "FLIP_VIDEO_CODE": None,  # Mude para 0 ou 1 se precisar virar o vídeo
+    
     # --- OTIMIZAÇÃO DE DESEMPENHO ---
+    "ANALYSIS_SCALE_PERCENT": 60,  # Reduz para 60% para análise, mais rápido
+
     # --- JOGADORES ---
     "PLAYER_A_NAME": "JOGADOR A",
     "PLAYER_B_NAME": "JOGADOR B",
-    "ANALYSIS_SCALE_PERCENT": 60,  # Reduz para 30% para análise, muito mais rápido
+    
     # --- CONTROLES ---
     "KEY_MAPPINGS": {
-        # ... (seu mapeamento de teclas permanece o mesmo) ...
         ord("A"): {"action": "START_POINT", "code": "A", "desc": "Jogador A"},
         ord("B"): {"action": "START_POINT", "code": "B", "desc": "Jogador B"},
         ord("1"): {"action": "ADD_EVENT", "code": "1", "desc": "1st Serve"},

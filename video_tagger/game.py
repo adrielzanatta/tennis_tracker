@@ -4,8 +4,10 @@ class TennisGame:
     games, sets e tie-breaks. Esta classe é o "cérebro" da partida.
     """
 
-    def __init__(self, player_a_name="A", player_b_name="B"):
+    def __init__(self, player_a_name="A", player_b_name="B", initial_server="A"):
         self.player_names = {"A": player_a_name, "B": player_b_name}
+        # Armazena o sacador inicial para resetar a partida corretamente
+        self.initial_server = initial_server
         self.reset_match()
 
     def reset_match(self):
@@ -15,7 +17,7 @@ class TennisGame:
             "B": {"points": 0, "games": 0, "sets": 0},
         }
         self.sets_history = []
-        self.server = "A"
+        self.server = self.initial_server
         self.is_tiebreak = False
         self.is_super_tiebreak = False
         self.match_over = False

@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from game_logic import determine_winner # Importa a lógica centralizada
+import copy
 
 class Command(ABC):
     """Interface para os comandos executáveis."""
@@ -66,10 +68,11 @@ class EndPointCommand(Command):
             self.app_state.last_event_info = "ERRO: Nenhum ponto ativo para finalizar!"
             return
         
-        # Adiciona o evento final (Winner/Error)
         AddEventCommand(self.app_state, self.event_info).execute()
         
-        point_winner = self._determine_winner()
+        # Usa a função de lógica centralizada
+        point_winner = determine_winner(self.app_state.current_point_data)
+        
         self.app_state.game.point_won_by(point_winner)
         self.app_state.add_point_to_history()
         
@@ -90,3 +93,39 @@ class EndPointCommand(Command):
             return server if last_shot_by_server else receiver
         else:  # Error ("E")
             return receiver if last_shot_by_server else server
+        
+class DeleteLastPointCommand(Command):
+    """
+    Comando para apagar o último ponto registrado (destrutivo).
+    """
+    def execute(self):
+        if self.app_state.current_state == "RECORDING_POINT":
+            # Cancela o ponto em andamento
+            self.app_state.reset_current_point(cancelled=True)
+            print("--- Ponto em andamento foi CANCELADO. ---")
+            return
+
+        if not self.app_state.all_points_data:
+            self.app_state.last_event_info = "Nenhum ponto para apagar."
+            print("--- Nenhum ponto concluído para apagar. ---")
+            return
+        
+        # Apaga o último ponto e seu histórico
+        deleted_point = self.app_state.all_points_data.pop()
+        if self.app_state.game_history:
+            self.app_state.game_history.pop()
+
+        self.app_state.point_counter -= 1
+        
+        # Recalcula todo o estado do jogo do zero para garantir consistência
+        self.app_state.game.reset_match()
+        self.app_state.game_history = []
+        for point_data in self.app_state.all_points_data:
+            winner = determine_winner(point_data)
+            if winner:
+                self.app_state.game.point_won_by(winner)
+                frame_of_point_end = point_data["events"][-1]["event_frame"]
+                self.app_state.game_history.append((frame_of_point_end, copy.deepcopy(self.app_state.game)))
+
+        self.app_state.last_event_info = f"Ponto {deleted_point['point_id']} foi APAGADO."
+        print(f"--- Último ponto (Ponto {deleted_point['point_id']}) foi APAGADO. O placar foi recalculado. ---")

@@ -4,9 +4,8 @@ from game import TennisGame
 class AppState:
     """
     Gerencia todo o estado da sessão de análise de vídeo.
-    Isso inclui o estado da reprodução, os dados dos pontos e o estado do jogo.
     """
-    def __init__(self, player_a_name: str, player_b_name: str, total_frames: int):
+    def __init__(self, player_a_name: str, player_b_name: str, total_frames: int, initial_server: str = "A"):
         self.is_paused = True
         self.current_frame_num = 0
         self.frame_increment = 1
@@ -21,11 +20,11 @@ class AppState:
         self.point_counter = 0
 
         # --- LÓGICA DO JOGO ---
-        self.game = TennisGame(player_a_name, player_b_name)
+        self.game = TennisGame(player_a_name, player_b_name, initial_server=initial_server)
         self.game_history = []
-        # Jogo para exibição, sincronizado com o frame
-        self.display_game = TennisGame(player_a_name, player_b_name)
+        self.display_game = TennisGame(player_a_name, player_b_name, initial_server=initial_server)
         self.current_player = None
+        self.fps = 30
 
     def toggle_pause(self):
         """Alterna o estado de pausa."""
@@ -46,13 +45,19 @@ class AppState:
     def update_display_game_for_frame(self):
         """
         Atualiza o estado do placar a ser exibido para corresponder
-        ao frame atual do vídeo.
+        ao frame atual do vídeo. Esta é a função chave para a navegação no tempo.
         """
+        # Itera na ordem inversa para encontrar o último estado de jogo válido
         for frame, game_state in reversed(self.game_history):
             if self.current_frame_num >= frame:
-                self.display_game = game_state
+                # *** CORREÇÃO APLICADA AQUI ***
+                # Usa uma cópia profunda (deepcopy) para garantir que o placar de exibição
+                # seja um objeto independente e não modifique o histórico do jogo.
+                self.display_game = copy.deepcopy(game_state)
                 return
-        # Se nenhum estado for encontrado, reseta para o início
+            
+        # Se nenhum estado de jogo foi encontrado (estamos antes do primeiro ponto),
+        # reseta o placar de exibição para um estado inicial limpo.
         self.display_game.reset_match()
 
     def add_point_to_history(self):
