@@ -3,7 +3,7 @@ import time
 import os
 import subprocess
 import copy
-import argparse # Importa a biblioteca de argumentos
+import argparse
 
 # Importações dos módulos do projeto
 from config import CONFIG
